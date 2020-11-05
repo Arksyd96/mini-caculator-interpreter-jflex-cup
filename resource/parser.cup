@@ -1,0 +1,193 @@
+// Si ce code fonctionne, alors il a été écrit par Aghiles Kebaili.
+// Sinon .. je ne sais pas qui l'a écrit
+
+import java_cup.runtime.*;
+import java.io.*;
+
+
+// --------------------------------------------------------------------------
+// Configuration du parser
+// --------------------------------------------------------------------------
+parser code {:
+	// ce boolean va me permettre de tester le parser
+	// la classe parser termine son execution avec la méthode done_parsing()
+	// et cette méthode ne nous permet pas de savoir sur quel état le parsing s'est terminé
+	protected boolean syntax_correct;
+
+	// le lien entre le lex et le parser
+	// on pourra avoir accès aux méthodes du lex grâce à cet attribut
+	protected Lexer lexer = new Lexer(new InputStreamReader(System.in));
+
+	// cette classe prendra en charge tout ce qui est en rapport avec la sémantique,
+	// la table des symboles et l'affichage des erreurs qui y sont liées
+	protected Semantic sem;
+
+	public parser(String input){
+		super();
+		this.lexer = new Lexer(new InputStreamReader(new ByteArrayInputStream(input.getBytes())));
+	}
+
+	// getter
+	public boolean isSyntaxCorrect(){
+		return syntax_correct;
+	}
+
+	// on redéfinit la méthode syntax_error pour mettre un message en francais
+	// et aussi indiqué qu'il y'a une erreur lors de l'analyse
+	public void syntax_error(Symbol cur_token){
+		report_error("    Erreur syntaxique sur le caractère " + 
+			(lexer.getCurToken().equals("\n") ? "VIDE" : lexer.getCurToken()) + "\n", null);
+		this.syntax_correct = false;
+		this.sem.verbose = true;
+	}
+
+	// NOTE : La valeur de error_sync_size() est reglée à 1
+	// En d'autres termes, l'analyseur va consommer un caractère seulement lors d'une erreur
+	// et continuer l'analyse comme si de rien n'était.
+	// ceci aura l'effet d'engendrer aussi des erreurs syntaxiques, 
+	// car le programme ne vas pas s'arrêter mais continuer à analyser.
+	protected int error_sync_size(){
+		return 1;
+	}
+
+	// main function
+	public static void main(String[] argv) throws Exception{
+		new parser().parse();
+	}
+
+:}
+
+// --------------------------------------------------------------------------
+// Initialisation des attributs
+// --------------------------------------------------------------------------
+init with {: 
+	// initialement il n y a pas d'erreur syntaxique
+	syntax_correct = true;
+	// création d'une instance de semantic
+	sem = new Semantic();
+:};
+
+scan with {:
+	return lexer.next_token();
+:}
+
+// --------------------------------------------------------------------------
+//	Les tokens et non-terminaux
+// --------------------------------------------------------------------------
+
+terminal String 	ident, t_ident;
+terminal Integer 	integer;
+terminal OACC, CACC, COMMA, OBRA, CBRA, CAT, AFFECT, OPAR, CPAR;
+terminal PLUS, MULT;
+terminal NEWL, PRINT;
+
+non terminal axiom;
+non terminal instructions, instruction;
+non terminal expr_list, table_expr, cat_table;
+non terminal to_affect;
+non terminal Integer 	expression, product, value, indexed_access, address, table;
+non terminal String 	variable, declaration;
+
+
+// --------------------------------------------------------------------------
+// Grammaire
+// --------------------------------------------------------------------------
+
+// axiom de départ
+axiom			::= instructions 					{: System.out.println("Au revoir"); :}
+					;
+
+// le programme contiendra une suite d'instructions séparées par des new line
+instructions	::= instruction NEWL instructions 
+					| {: /*epsilon*/ :}
+					;
+
+// une instruction peut etre une déclaration de variable/tableau, une expression arithmétique
+// ou bien un tableau tout court
+instruction 	::= expression:a 					{: parser.sem.afficherResultatExpression(a); :}
+					| table:i 						{: parser.sem.afficherTableau(i); :}
+					| declaration:s 				{: parser.sem.afficherDeclaration(s); :}
+					| PRINT 						{: parser.sem.print(); :}
+					| error 						{: parser.sem.acc().clear(); :}			
+					| {: /*epsilon*/ :}
+					;
+
+// un tableau suivi, ou pas, d'un accès avec index, on renvoi alors la valeur i depuis l'acc
+table 			::= table_expr address:i {: RESULT = i; :}
+					;
+
+											// epislon = aucun index donné = null
+address 		::= OBRA expression:a CBRA {: RESULT = a; :} | {: RESULT = null; :}
+					;
+
+// tableau, ou une suite de concat de tableau
+table_expr 		::= OACC expr_list CACC cat_table
+					;
+
+// une suite de 0 à N concaténations
+cat_table		::= CAT table_expr | {: /*epsilon*/ :}
+					;
+
+// on peut utiliser des expression arithmetiques dans un tableau
+// j'ai utilisé une grammaire récursive gauche pour ne pas avoir à inverser les tableaux
+// à chaque fois que je concat
+													// j'ajoute le résultat de chaque expression
+													// dans mon accumulateur
+expr_list		::=  expr_list COMMA expression:a 	{: parser.sem.acc().add(a); :}
+					| expression:a 					{: parser.sem.acc().add(a); :}
+					;
+
+// expression arithmétique (prend en compte l'associativité gauche)
+// l'utilisation de tableau avec des entiers renvoit une erreur syntaxique
+// 5 + {4, 6} 	=> erreur syntaxique 
+// 5 + @a 		=> erreur sémantique
+													// la fonction calculate permet de garder une trace
+													// sur la derniere opération utilisée
+expression 		::= expression:a PLUS product:b 	{: RESULT = parser.sem.calculate(a, b, "+"); :}
+					| product:a 					{: RESULT = a; :}
+					;
+													// pareil ici
+product			::= product:a MULT value:b 			{: RESULT = parser.sem.calculate(a, b, "*"); :}
+					| value:a 						{: RESULT = a; :}
+					;
+
+value			::= integer:a 						{: RESULT = a; :}
+													// lookUp vérifie si a existe, sinon met
+													// verbose = false pour afficher une erreur sémantique
+													// et non pas le résultat du calcul
+					| ident:a 						{: RESULT = parser.sem.lookUp(a); :}						
+					| indexed_access:a 				{: RESULT = a; :}
+					| OPAR expression:a CPAR 		{: RESULT = a; :}
+													// dans le cas ou on veut consulter le contenu d'une variable
+													// de type tableau, j'ai préféré la mettre ici au lieu de
+													// créer d'autres non terminaux. À ce niveau on charge
+													// le contenu du tableau dans l'accumulateur et on met loading = true
+					| t_ident:s						{: RESULT = 0; parser.sem.loadInAcc(s); :}
+					;
+
+
+// accès indicé
+													// on vérifie si le tableau existe, et on donne
+													// à la fonction lookUp l'index voulu
+													// ça nous renvoi l'entier
+indexed_access	::= t_ident:s OBRA expression:a CBRA {: RESULT = parser.sem.lookUp(s, a); :}
+					;
+
+// declaration entier ou tableau
+													// la fonction declare() va déclarer une nouvelle variable
+													// selon l'identificateur de la variable (commençant par @)
+													// si le type est incompatible alors emet une erreur sémantique
+declaration 	::= variable:s AFFECT to_affect 	{: RESULT = parser.sem.declare(s); :}
+					;
+
+variable 		::= ident:s 						{: RESULT = s; :}
+					| t_ident:s 					{: RESULT = s; :}
+					;
+
+//dans le cas d'un tableau, le résutlat est déja dans l'accumulateur
+to_affect 		::= table
+													// si on affecte un entier alors on le met dans l'acc
+													// pour après le stocker dans une nouvelle variable
+					| expression:a 					{: parser.sem.acc().add(a); :}
+					;
+
